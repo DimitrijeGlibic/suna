@@ -633,21 +633,45 @@ timeout. The root-list poll and every `/event` subscribe wait for that first
 answer (at most 5 s). A subscribe bounds its header phase at 10 s; the stream is
 never cut. Rule: the `learnings` skill, 2026-09-15 entry.
 
-**Verified** on Daytona with the fixture above, S3 from a laptop MinIO through a
-quick tunnel (acquisition ~1.1 s), two runs × 10 rounds per arm:
+**Verified** on Daytona with the fixture above and the object store a real
+bucket in the boxes' region (us-east-2, plain regional endpoint, no Transfer
+Acceleration; same throwaway account and module as the section above, objects
+rebuilt into it and verified: `tree` 1,576,450 B / 652 entries, `blobs`
+1,600,272 B). Fix commits `dfe4ac7a44` + `42afae8b05`, image
+`kortix-default-7f9ce7233af1`. 30 rounds per arm alternating, one warm-up
+discarded, in-box probe and daemon retry log on, and a parallel log watcher
+(250 ms) recording every `/event` subscribe. Boxes: New York 42, Leesburg 8,
+Ashburn 6, Los Angeles 4. Bucket destroyed afterwards.
 
-| Arm | Full boot p50 / p95 | `repo-materialized` p50 | `opencode-http-listening` p50 | `opencode-listening` p50 | Root-list request → answer p50 / max |
-|---|---|---|---|---|---|
-| Git | 6,568 / 10,587 ms | 1,157 ms | 1,464 ms | 2,225 ms | 616 / 1,163 ms |
-| S3 | 6,646 / 12,693 ms | 1,110 ms | 1,504 ms | 2,346 ms | 653 / 1,093 ms |
+| Arm | Acquisition p50 / p95 | `repo-materialized` p50 | Full boot p50 / p95 | `opencode-http-listening` p50 | `opencode-listening` p50 | Root-list request → answer p50 / p95 / max | Subscribe answered |
+|---|---|---|---|---|---|---|---|
+| Git (`git` mode) | 926 / 1,717 ms | 960 ms | 6,249 / 9,761 ms | 1,434 ms | 2,186 ms | 620 / 889 / 8,359 ms | 30/30, 0 header timeouts |
+| S3 v2 + presign, plain (`prefer-s3`) | 359 / 2,334 ms | 394 ms | 6,263 / 12,455 ms | 1,524 ms | 2,152 ms | 1,056 / 1,390 / 1,402 ms | 30/30, 0 header timeouts |
 
 Root-list request → answer is `opencode-listening − managed-reconcile` (5,434 ms
-on S3 before the fix). 18/40 rounds started that poll before OpenCode's first
-answer; none lost a request. The subscribe was answered on 20/20 rounds of the
-second run (0 header-timeout retries). After a Daytona stop → resume (checkout
-adopted in 98–162 ms) a prompt ended `completed` in 2.2–2.6 s. The remaining
-~0.7 s between `opencode-http-listening` and `opencode-listening` is boot work
-(config deps, workspace reload) plus OpenCode's first directory Instance init.
+on S3 before the fix; a request lost in the window costs ≥ 5,000 ms). S3 boots
+materialize the repository 566 ms before Git and reach `runtimeReady` at the
+same time (+14 ms at the median; before the fix on this bucket: 9.9 s vs
+6.1 s). 22/30 S3 and 18/30 Git rounds started the root-list poll before
+OpenCode's first answer; the S3 median is longer because that poll now waits
+for the port (~500 ms) and then OpenCode's Instance init, and its maximum was
+1,402 ms. The one Git round above 5 s (8,359 ms) was a slow box: OpenCode's
+liveness route first answered at 4.3 s, and the root list and the in-flight
+`/event` subscribe were both answered at 10.5 s with no header timeout
+(`/start` took 16.8 s on that box, 6 s elsewhere). The S3 p95s are the object
+store, not the daemon: 6/30 rounds retried a short-closed download (the Bun
+signature above, 3.6–52 KB short, 7 events; single-attempt rounds 353 / 1,324
+ms, retried rounds 1,192 ms at the median) and one Los Angeles box trickled the
+tree object for 6.5 s in a single attempt (its `/start` took 27 s). Hydration
+`ok` 30/30 (import p50 103 ms); descriptor `env` 24, `proxy` 6 (the retries).
+A real prompt on a fresh S3 session ended `completed` in 3.1 s (Git: 2.7 s),
+with one `[opencode-events] subscribed` line 2.0 s after spawn and no
+`subscribe got no response headers`. After a Daytona stop → resume (checkout
+adopted in 108–112 ms) the resumed session subscribed once, 1.9 s after
+spawn, and its prompt ended `completed` in 2.3 s (S3-born) and 2.8 s
+(Git-born), delivered inline. The remaining ~0.6 s between
+`opencode-http-listening` and `opencode-listening` is boot work (config deps,
+workspace reload) plus OpenCode's first directory Instance init.
 
 ## Compatibility gate (gate 6, v1 run)
 
