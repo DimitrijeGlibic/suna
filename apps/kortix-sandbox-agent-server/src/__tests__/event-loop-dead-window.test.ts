@@ -81,6 +81,11 @@ describe('event loop vs OpenCode bind→handler window', () => {
     expect(acceptedCount()).toBeGreaterThanOrEqual(2)
     expect(Date.now() - started).toBeGreaterThanOrEqual(190)
     expect(Date.now() - started).toBeLessThan(3_000)
+    // The timeout bounds the header phase only: an answered stream that stays
+    // silent for 3x the timeout is never cut and never re-subscribed.
+    const subscribed = acceptedCount()
+    await Bun.sleep(600)
+    expect(acceptedCount()).toBe(subscribed)
   })
 
   test('no subscribe is sent before the supervisor reports the first HTTP answer', async () => {

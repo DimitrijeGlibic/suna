@@ -44,7 +44,7 @@ import { ensureInjectedManagedSkills } from './injected-skills'
 // milliseconds to the readiness the API and the frontend poll for.
 import { configureRuntimeConvergence, scheduleRuntimeAssetsReconcile } from './runtime-assets'
 import { isSharedSeedBakedRoot, OPENCODE_SEED_BAKED_PIN_PATH } from './opencode-fork-root'
-import { startOpencodeEventLoop, flattenOpencodeError, type QuestionRequest, type OpencodeTurnError } from './opencode-events'
+import { startOpencodeEventLoop, flattenOpencodeError, waitForSignalOrTimeout, type QuestionRequest, type OpencodeTurnError } from './opencode-events'
 import { createTurnAutoResumer } from './turn-auto-resume'
 import { kortixEventBus } from './kortix-event-bus'
 import { runtimeStateStore } from './runtime-state-projection'
@@ -1952,37 +1952,19 @@ type FastOpencodeRootReadinessDeps = {
   waitForSignal?: (signal: Promise<void>, timeoutMs: number) => Promise<void>
 }
 
-async function waitForSignalOrTimeout(signal: Promise<void>, timeoutMs: number): Promise<void> {
-  if (timeoutMs <= 0) return
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    await Promise.race([
-      signal.catch(() => undefined),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
 /**
  * Hold the root lookup until OpenCode can actually answer it.
  *
  * Every boot waits for the supervisor's first HTTP answer from the current
  * OpenCode. A freshly spawned OpenCode binds its port ~100 ms before its
  * request handler exists, and a root-list request that lands in that window is
- * never answered: it burns the whole 5 s attempt timeout, then the retry is
- * answered in milliseconds. That was the S3-boot penalty measured on
- * 2026-09-15 (`opencode-listening` at 6.2 s instead of 2.3 s): the S3 checkout
- * lands early enough for the poll to be running when the port binds, the Git
- * checkout mostly does not. The FAST path additionally waits for the first
- * successful session-API response, replacing at most one doomed request during
- * OpenCode's instance init. Elapsed gate time is deducted from the existing
- * 20-second root-resolution budget, so neither wait can extend boot. The
- * unchanged resolver still owns retries, root selection, and
- * found/create/defer decisions.
+ * never answered: it burns the whole 5 s attempt timeout (`opencode-listening`
+ * at 6.2 s instead of 2.1 s on S3 boots, 2026-09-15, whose checkout lands before
+ * the port binds). The FAST path additionally waits for the first successful
+ * session-API response, replacing at most one doomed request during OpenCode's
+ * instance init. Elapsed gate time is deducted from the existing 20-second
+ * root-resolution budget, so neither wait can extend boot. The unchanged
+ * resolver still owns retries, root selection, and found/create/defer decisions.
  */
 export async function waitForFastOpencodeRootReadiness(
   input: FastOpencodeRootReadinessInput,

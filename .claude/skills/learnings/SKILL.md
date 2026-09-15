@@ -23,36 +23,25 @@ linked, not inlined.
 
 ### A request that reaches OpenCode's port before its request handler exists is never answered — every boot-time request needs a short timeout or a "has answered once" gate (2026-09-15)
 
-**When:** adding any HTTP call from `kortixd` to a freshly spawned OpenCode —
-a probe, a poll, a subscribe — or changing when boot reaches such a call.
-OpenCode 1.18 (Effect `NodeHttpServer`) calls `server.listen()` in `make` and
-attaches `on("request")` only in `serve`, after the router is built: a ~100 ms
-window in which the kernel accepts connections, the request is parsed, and its
-`request` event has no listener. It is never answered and never retried by the
-server; the client waits for its own timeout. Measured in a box with a plain
-socket sprayer: 6/6 connections in the first 102 ms after bind dropped,
-everything from 20 ms later answered in ≤18 ms. A 100 ms poller ALWAYS lands
-in that window once (12/12 trials, Bun and Python).
-Cost by caller: readiness probe 2 s, root-list poll 5 s, `/event` subscribe
-FOREVER (it had no timeout). S3 boots hit all three on every round because the
-checkout lands early enough for those calls to be polling when the port binds;
-Git boots mostly start them ~1.6 s in, after the window. Symptom on the API:
-`session_turns.end_reason = 'unknown'` 18 s after the prompt (reaper fallback)
-instead of `'completed'` at 3 s (the daemon's idle relay never fires).
+**When:** adding any HTTP call from `kortixd` to a freshly spawned OpenCode (a
+probe, a poll, a subscribe), or moving boot work earlier. OpenCode 1.18 (Effect
+`NodeHttpServer`) binds its port ~100 ms before it attaches its request handler.
+A request accepted in that window is never answered; the client waits for its
+own timeout. The first accepted connection is dropped on every spawn (3/3 on
+1.18.23 locally, 6/6 in a box). Cost by caller: readiness probe 2 s, root-list
+poll 5 s, `/event` subscribe for the whole session (it had no timeout). Fast
+acquisition exposes it: every S3 boot, 2/20 Git boots.
 **Rules:** (1) until the current OpenCode has answered once, probe only the
-instance-free liveness route with `LISTENING_PROBE_TIMEOUT_MS` (300 ms);
-(2) every other boot-time request waits on
-`opencode.waitForCurrentListeningResponse()` first — the root-list gate in
-`waitForFastOpencodeRootReadiness` and the `/event` loop both do; (3) a
-long-lived subscribe bounds its HEADER phase (`subscribeHeadersTimeoutMs`),
-never the stream. (4) A new 100 ms poll against OpenCode without (1)–(3) is a
-regression of this entry.
-*Incident:* the S3 config-provider bench, 2026-09-15 (Ohio, 20 rounds/arm):
-`opencode-ready` 6.2 s on S3 vs 2.3 s on Git, and a stuck event subscription
-on 16/20 S3 boots. Never hit dev users: S3 is opt-in per project.
+liveness route with `LISTENING_PROBE_TIMEOUT_MS` (300 ms); (2) every other
+boot-time request waits on `opencode.waitForCurrentListeningResponse()` first;
+(3) every request to OpenCode carries a timeout, and a long-lived subscribe
+bounds its HEADER phase (`subscribeHeadersTimeoutMs`), never the stream.
+*Incident:* S3 config-provider bench, 2026-09-15: `runtimeReady` 9.9 s on S3 vs
+6.1 s on Git; a hung subscribe made the API end turns via the reaper
+(`end_reason = unknown` at ~18 s) instead of `completed` at ~3 s. Dev impact
+not measured (S3 is opt-in per project).
 *Enforcer:* `opencode-listening-response.test.ts` (dead-window fake binary),
-`event-loop-dead-window.test.ts`, and the source-shape assertions in
-`boot-instrumentation.test.ts` / `opencode-root-readiness-gate.test.ts`.
+`event-loop-dead-window.test.ts`, `opencode-root-readiness-gate.test.ts`.
 
 ### Moving a surface under a URL namespace must move every reader, and an effect must never depend on a per-render localized object (2026-09-14)
 
