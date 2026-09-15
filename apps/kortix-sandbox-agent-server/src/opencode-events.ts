@@ -65,6 +65,36 @@ type OpencodeEventHandlers = {
 
 export interface OpencodeEventLoopOptions {
   reconcileIntervalMs?: number
+  /**
+   * How long one subscribe attempt may wait for OpenCode's response HEADERS
+   * (OpenCode sends them with `server.connected` in ~35 ms). The timer is
+   * cleared when the headers arrive, so the stream itself is never cut. A
+   * subscribe that reaches OpenCode inside its bind→handler window (see
+   * LISTENING_PROBE_TIMEOUT_MS in opencode.ts) is never answered; without this
+   * bound it hung for the life of the session (S3 boots, 2026-09-15).
+   */
+  subscribeHeadersTimeoutMs?: number
+  /** How long to hold an attempt for the supervisor's first HTTP answer. */
+  listeningWaitMaxMs?: number
+}
+
+const SUBSCRIBE_HEADERS_TIMEOUT_MS = 10_000
+const LISTENING_WAIT_MAX_MS = 5_000
+
+/** Resolve when `signal` settles or after `timeoutMs`, whichever comes first. */
+export async function waitForSignalOrTimeout(signal: Promise<void>, timeoutMs: number): Promise<void> {
+  if (timeoutMs <= 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      signal.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 // Subscribe to opencode's SSE event stream and dispatch known event types.
@@ -93,11 +123,24 @@ export function startOpencodeEventLoop(
 
   async function connectOnce(): Promise<void> {
     const url = `${opencode.getInternalUrl()}/event?directory=${encodeURIComponent(cfg.workspace)}`
-    abortController = new AbortController()
-    const res = await fetch(url, {
-      headers: { Accept: 'text/event-stream' },
-      signal: abortController.signal,
-    })
+    const controller = new AbortController()
+    abortController = controller
+    // Bound the HEADER phase only (cleared once `fetch` resolves): a subscribe
+    // dropped in OpenCode's bind→handler window must not hang forever.
+    const headersTimeoutMs = options.subscribeHeadersTimeoutMs ?? SUBSCRIBE_HEADERS_TIMEOUT_MS
+    const headersTimer = setTimeout(() => {
+      logger.warn('[opencode-events] subscribe got no response headers; retrying', { timeoutMs: headersTimeoutMs })
+      controller.abort()
+    }, headersTimeoutMs)
+    let res: Response
+    try {
+      res = await fetch(url, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(headersTimer)
+    }
     if (!res.ok || !res.body) {
       throw new Error(`/event subscribe non-ok: ${res.status}`)
     }
@@ -171,6 +214,15 @@ export function startOpencodeEventLoop(
     const POST_CONNECT_BACKOFF_START_MS = 250
     let backoffMs = PRE_CONNECT_RETRY_MS
     while (!stopping) {
+      // Never subscribe before the current OpenCode has answered something:
+      // its port is bound ~100 ms before its request handler exists, and a
+      // request sent then is never answered. Applies to reconnects as well —
+      // a restarted OpenCode has a fresh window. Bounded so a dead OpenCode
+      // still falls through to the ordinary refused/retry path. Optional call:
+      // test doubles without the supervisor method keep the ungated loop.
+      const listening = opencode.waitForCurrentListeningResponse?.()
+      if (listening) await waitForSignalOrTimeout(listening, options.listeningWaitMaxMs ?? LISTENING_WAIT_MAX_MS)
+      if (stopping) return
       try {
         await connectOnce()
       } catch (err) {
