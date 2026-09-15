@@ -602,9 +602,8 @@ run, 2026-09-15 afternoon: 2/20).
 **Full boot** (`runtimeReady`) is 9.9 s on S3 against 6.1 s on Git in every
 run although S3 materializes the repository 700 ms earlier: the daemon's early
 root-list poll lands in OpenCode's bind→handler window (`opencode-listening`
-6.2 s vs 2.1 s in-guest), the fix for which was reverted out of this PR
-(`14ccfd135a` → `fe7aee341b`). `repo-materialized` is the acquisition
-comparison; `runtimeReady` is not.
+6.2 s vs 2.1 s in-guest); see "Known issue → fixed" below. `repo-materialized`
+is the acquisition comparison; `runtimeReady` is not.
 
 Reading: from a bucket in the boxes' own region the S3 boot acquires the
 project **3.4–3.8× faster than the Git bundle at the median** (275–288 ms vs
@@ -616,6 +615,39 @@ are level (1,367 vs 1,338) and every boot stays on S3. The retry cost is the
 remaining lever: a short close on the env-presigned URL is transient and the
 URL is still valid, so retrying it in place (no backoff, no proxy descriptor)
 would cut an affected boot from ~1.3 s to ~0.6 s.
+
+### Known issue → fixed: OpenCode's bind→handler window (2026-09-15)
+
+**Mechanism.** OpenCode 1.18 binds its port ~100 ms before it attaches its
+request handler. A request accepted in that window is never answered; the client
+waits for its own timeout (first accepted connection dropped on every spawn of
+the pinned 1.18.23 binary, 3/3). kortixd sent three requests that early whenever
+the checkout landed before OpenCode bound: the readiness probe (2 s timeout), the
+root-list poll (5 s) and the `/event` subscribe (no timeout). The subscribe then
+hung for the session: `session.idle` never reached the API, which ended turns
+through its reaper (`end_reason = unknown`, ~18 s) instead of `completed` (~3 s).
+
+**Fix** (kortixd, branch `opencode-bind-window`). Until the current OpenCode has
+answered once, the supervisor probes only the liveness route with a 300 ms
+timeout. The root-list poll and every `/event` subscribe wait for that first
+answer (at most 5 s). A subscribe bounds its header phase at 10 s; the stream is
+never cut. Rule: the `learnings` skill, 2026-09-15 entry.
+
+**Verified** on Daytona with the fixture above, S3 from a laptop MinIO through a
+quick tunnel (acquisition ~1.1 s), two runs × 10 rounds per arm:
+
+| Arm | Full boot p50 / p95 | `repo-materialized` p50 | `opencode-http-listening` p50 | `opencode-listening` p50 | Root-list request → answer p50 / max |
+|---|---|---|---|---|---|
+| Git | 6,568 / 10,587 ms | 1,157 ms | 1,464 ms | 2,225 ms | 616 / 1,163 ms |
+| S3 | 6,646 / 12,693 ms | 1,110 ms | 1,504 ms | 2,346 ms | 653 / 1,093 ms |
+
+Root-list request → answer is `opencode-listening − managed-reconcile` (5,434 ms
+on S3 before the fix). 18/40 rounds started that poll before OpenCode's first
+answer; none lost a request. The subscribe was answered on 20/20 rounds of the
+second run (0 header-timeout retries). After a Daytona stop → resume (checkout
+adopted in 98–162 ms) a prompt ended `completed` in 2.2–2.6 s. The remaining
+~0.7 s between `opencode-http-listening` and `opencode-listening` is boot work
+(config deps, workspace reload) plus OpenCode's first directory Instance init.
 
 ## Compatibility gate (gate 6, v1 run)
 
