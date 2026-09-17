@@ -165,8 +165,12 @@ async function run(): Promise<void> {
   const token = await jwt();
   const t0 = performance.now();
   const at = () => Math.round(performance.now() - t0);
-  const out: Record<string, unknown> = { project_id: projectId, provider };
-  const created = await api(base, token, `/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify({ provider }) });
+  const sandboxSlug = arg('sandbox-slug');
+  const out: Record<string, unknown> = { project_id: projectId, provider, sandbox_slug: sandboxSlug ?? null };
+  const created = await api(base, token, `/projects/${projectId}/sessions`, {
+    method: 'POST',
+    body: JSON.stringify({ provider, ...(sandboxSlug ? { sandbox_slug: sandboxSlug } : {}) }),
+  });
   if (created.status !== 201) throw new Error(`create ${created.status}: ${JSON.stringify(created.body).slice(0, 300)}`);
   const sessionId: string = created.body.session_id ?? created.body.id;
   out.session_id = sessionId;
@@ -261,7 +265,11 @@ async function run(): Promise<void> {
   } catch (err) {
     out.error = err instanceof Error ? err.message : String(err);
   } finally {
-    if (!keep) await api(base, token, `/projects/${projectId}/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    if (!keep) {
+      // Stop first: on a local DB with schema drift the DELETE can fail and leave the box running.
+      await api(base, token, `/projects/${projectId}/sessions/${sessionId}/stop`, { method: 'POST' }).catch(() => {});
+      await api(base, token, `/projects/${projectId}/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    }
   }
   console.log(JSON.stringify(out, null, 2));
   if (out.error) process.exit(1);

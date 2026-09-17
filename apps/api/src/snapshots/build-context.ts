@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createGzip } from 'node:zlib';
 import { AGENT_BROWSER_VERSION, OPENCODE_VERSION } from '@kortix/shared';
-import { buildMetaSandboxDockerfile } from '@kortix/shared/sandbox';
+import { buildMetaSandboxDockerfile, buildPiMinimalSandboxDockerfile } from '@kortix/shared/sandbox';
 import { gatewayModelCatalog } from '../llm-gateway/models/catalog-models';
 import { managedSkillOverlayFiles } from '../runtime-assets/managed-skills';
 import { appCaddyBinaryPath, appdBinaryPath } from '../apps/runtime-artifacts';
@@ -236,6 +236,36 @@ export async function stageMetaBuildContext(): Promise<StagedContext> {
     buildMetaSandboxDockerfile({
       agentBinaryPath: 'kortix-agent.gz',
       cliBinaryPath: 'kortix.gz',
+      entrypointScriptPath: 'kortix-entrypoint',
+      catalogPath: 'kortix-llm-catalog.json',
+      managedSkillsPath: 'managed-skills',
+    }),
+  );
+  return { contextDir, composedPath, dockerfileName };
+}
+
+/** Stage the pi-only session image: daemon, entrypoint, model catalog, managed skills. */
+export async function stagePiMinimalBuildContext(): Promise<StagedContext> {
+  const agentPath = agentBinPath();
+  const entrypointPath = entrypointSrcPath();
+  await assertExists(agentPath, 'KORTIX_SNAPSHOT_AGENT_BIN_PATH');
+  await assertExists(entrypointPath, 'KORTIX_SNAPSHOT_ENTRYPOINT_PATH');
+
+  const contextDir = await mkdtemp(join(tmpdir(), 'kortix-pimin-snap-'));
+  await gzipFile(agentPath, join(contextDir, 'kortix-agent.gz'));
+  await copyFile(entrypointPath, join(contextDir, 'kortix-entrypoint'));
+  await stageManagedSkills(join(contextDir, 'managed-skills'));
+  await writeFileFs(
+    join(contextDir, 'kortix-llm-catalog.json'),
+    JSON.stringify({ models: gatewayModelCatalog('shared-seed') }),
+  );
+
+  const dockerfileName = 'Dockerfile';
+  const composedPath = join(contextDir, dockerfileName);
+  await writeFileFs(
+    composedPath,
+    buildPiMinimalSandboxDockerfile({
+      agentBinaryPath: 'kortix-agent.gz',
       entrypointScriptPath: 'kortix-entrypoint',
       catalogPath: 'kortix-llm-catalog.json',
       managedSkillsPath: 'managed-skills',
@@ -460,7 +490,7 @@ export async function stagePiWorkerBuildContext(): Promise<StagedContext> {
   return { contextDir, composedPath, dockerfileName };
 }
 
-export type RuntimeBuildProfile = 'standard' | 'meta' | 'app' | 'pi-worker';
+export type RuntimeBuildProfile = 'standard' | 'meta' | 'app' | 'pi-worker' | 'pi-minimal';
 
 /** Select one runtime renderer for every provider adapter. */
 export async function stageRuntimeBuildContext(input: {
@@ -478,6 +508,8 @@ export async function stageRuntimeBuildContext(input: {
       return stageMetaBuildContext();
     case 'pi-worker':
       return stagePiWorkerBuildContext();
+    case 'pi-minimal':
+      return stagePiMinimalBuildContext();
     default:
       return stageBuildContext(
         input.snapshotName,

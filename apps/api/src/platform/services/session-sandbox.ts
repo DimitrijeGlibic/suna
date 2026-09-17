@@ -14,7 +14,7 @@
 
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { projectSessions, sessionSandboxes } from '@kortix/db';
-import { PI_WORKER_SANDBOX_SLUG } from '@kortix/shared';
+import { PI_MINIMAL_SANDBOX_SLUG, PI_WORKER_SANDBOX_SLUG } from '@kortix/shared';
 import { isMetaAgentName, META_SANDBOX_SLUG } from '@kortix/shared';
 import { db } from '../../shared/db';
 import { PROVISIONING_SESSION_STATUSES } from '../../projects/lib/session-status';
@@ -380,7 +380,12 @@ export async function provisionSessionSandbox(opts: {
           import('../../snapshots/builder').then(({ ensurePiWorkerImage }) =>
             ensurePiWorkerImage({ source: 'session-start', provider: targetProvider }),
           )
-        : ensureSandboxImage(gitProject, {
+        : slug === PI_MINIMAL_SANDBOX_SLUG
+          ? // Lazy for the same mock.module reason as the pi worker above.
+            import('../../snapshots/builder').then(({ ensurePiMinimalSandboxImage }) =>
+              ensurePiMinimalSandboxImage({ source: 'session-start', provider: targetProvider }),
+            )
+          : ensureSandboxImage(gitProject, {
           slug,
           accountId,
           source: 'session-start',
@@ -546,6 +551,8 @@ export async function provisionSessionSandbox(opts: {
     location,
     envVars: {
       ...(opts.extraEnvVars ?? {}),
+      // The pi-only image has no OpenCode, so it always boots the pi harness.
+      ...(slug === PI_MINIMAL_SANDBOX_SLUG ? { KORTIX_HARNESS: 'pi' } : {}),
       // One sandbox, one session-scoped Kortix credential. Provider, connector,
       // executor and Git credentials stay server-side. The route being called
       // determines what this token may do.
@@ -580,7 +587,7 @@ export async function provisionSessionSandbox(opts: {
       slug: string;
       contentHash: string;
       isDefault: boolean;
-      runtimeProfile?: 'standard' | 'meta' | 'pi-worker';
+      runtimeProfile?: 'standard' | 'meta' | 'pi-worker' | 'pi-minimal';
     } | null = null;
     // FIX-A: the project's ACTIVATED routing pin (provider + exact template id
     // and image name), read once, best-effort — a DB hiccup yields null → name-boot. Set

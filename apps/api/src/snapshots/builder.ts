@@ -129,7 +129,7 @@ export interface EnsureSandboxImageResult {
   contentHash: string;
   built: boolean;
   isDefault: boolean;
-  runtimeProfile?: 'standard' | 'meta' | 'pi-worker';
+  runtimeProfile?: 'standard' | 'meta' | 'pi-worker' | 'pi-minimal';
 }
 
 /**
@@ -1375,6 +1375,90 @@ export async function ensureMetaSandboxImage(opts: {
     return await image;
   } finally {
     if (ownsImage) metaImageBuilds.delete(buildKey);
+  }
+}
+
+const piMinimalImageBuilds = new Map<string, Promise<EnsureSandboxImageResult>>();
+let piMinimalRuntimeFingerprint: Promise<string> | null = null;
+
+/** Names are `kortix-pimin-<env>-<hash16>`, namespaced like the meta image so the reap stays per environment. */
+const PIMINIMAL_SNAPSHOT_PREFIX = 'kortix-pimin';
+
+function currentPiMinimalRuntimeFingerprint(): Promise<string> {
+  if (piMinimalRuntimeFingerprint) return piMinimalRuntimeFingerprint;
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+  piMinimalRuntimeFingerprint = buildRuntimeArtifactFingerprint({
+    sandboxVersion: 'pi-minimal-v1',
+    opencodeVersion: 'none',
+    artifacts: [
+      { label: 'agent', path: resolve(root, 'apps/kortix-sandbox-agent-server/src') },
+      { label: 'agent-package', path: resolve(root, 'apps/kortix-sandbox-agent-server/package.json') },
+      { label: 'entrypoint', path: resolve(root, 'apps/sandbox/entrypoint.sh') },
+      { label: 'pi-minimal-renderer', path: resolve(root, 'packages/shared/src/sandbox/pi-minimal-dockerfile.ts') },
+      { label: 'llm-catalog', path: resolve(root, 'packages/llm-catalog/src') },
+      { label: 'starter', path: resolve(root, 'packages/starter/src') },
+      { label: 'starter-templates', path: resolve(root, 'packages/starter/templates') },
+    ],
+  });
+  return piMinimalRuntimeFingerprint;
+}
+
+/**
+ * The pi-only session image (`PI_MINIMAL_SANDBOX_SLUG`): one shared,
+ * content-hashed image per environment, built on first use like the meta image.
+ */
+export async function ensurePiMinimalSandboxImage(opts: {
+  source?: SnapshotBuildSource;
+  provider: string;
+}): Promise<EnsureSandboxImageResult> {
+  const provider = getSandboxProvider(opts.provider);
+  if (!provider.isConfigured()) {
+    throw new SnapshotBuildError(`Sandbox provider ${opts.provider} is not configured`);
+  }
+  const fingerprint = await currentPiMinimalRuntimeFingerprint();
+  const contentHash = createHash('sha256').update(`pi-minimal-runtime-v1\0${fingerprint}`).digest('hex');
+  const snapshotName = `${PIMINIMAL_SNAPSHOT_PREFIX}-${config.INTERNAL_KORTIX_ENV}-${contentHash.slice(0, 16)}`;
+  const result = (built: boolean): EnsureSandboxImageResult => ({
+    snapshotName,
+    slug: 'pi-minimal',
+    contentHash,
+    built,
+    isDefault: false,
+    runtimeProfile: 'pi-minimal',
+  });
+  const buildKey = `${opts.provider}:${snapshotName}`;
+  let image = piMinimalImageBuilds.get(buildKey);
+  let ownsImage = false;
+  if (!image) {
+    ownsImage = true;
+    image = (async () => {
+      let state = await provider.getSnapshotState(snapshotName);
+      if (state === 'building') state = await waitForProviderBuild(provider, snapshotName);
+      if (state === 'active') return result(false);
+      if (state === 'build_failed') await provider.deleteSnapshot(snapshotName);
+      await provider.buildSnapshot({
+        snapshotName,
+        userDockerfile: '# platform pi-minimal runtime',
+        spec: { cpu: 2, memoryGb: 4, diskGb: 20 },
+        slug: 'pi-minimal',
+        isShared: true,
+        runtimeProfile: 'pi-minimal',
+      });
+      await reapSupersededEnvironmentRuntimeSnapshots(
+        provider,
+        PIMINIMAL_SNAPSHOT_PREFIX,
+        'pi-minimal',
+        snapshotName,
+        recentlyBuiltStrict,
+      );
+      return result(true);
+    })();
+    piMinimalImageBuilds.set(buildKey, image);
+  }
+  try {
+    return await image;
+  } finally {
+    if (ownsImage) piMinimalImageBuilds.delete(buildKey);
   }
 }
 

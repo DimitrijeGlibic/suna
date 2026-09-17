@@ -10,7 +10,7 @@ import {
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { isMetaAgentName, META_AGENT_NAME, META_SANDBOX_SLUG, PI_WORKER_SANDBOX_SLUG } from '@kortix/shared';
+import { isMetaAgentName, META_AGENT_NAME, META_SANDBOX_SLUG, PI_MINIMAL_SANDBOX_SLUG, PI_WORKER_SANDBOX_SLUG } from '@kortix/shared';
 import { checkBillingActive } from '../../billing/services/billing-gate';
 import { accountMayUseManagedModels } from '../../billing/services/entitlements';
 import { type SandboxProviderName, config } from '../../config';
@@ -1435,7 +1435,8 @@ export async function createProjectSession(input: {
     !platformMetaAgent &&
     sandboxSlug &&
     sandboxSlug !== DEFAULT_SANDBOX_SLUG &&
-    sandboxSlug !== PI_WORKER_SANDBOX_SLUG
+    sandboxSlug !== PI_WORKER_SANDBOX_SLUG &&
+    sandboxSlug !== PI_MINIMAL_SANDBOX_SLUG
   ) {
     try {
       await resolveTemplate(

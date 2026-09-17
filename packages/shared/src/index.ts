@@ -13,6 +13,7 @@ export * from "./runtime-versions";
 export * from "./project-glyphs";
 export * from "./meta-agent";
 export * from "./pi-worker";
+export * from "./pi-minimal";
 export * from "./environment-secret";
 export * from "./utils/format-relative";
 export * from './prompt-attachments';
