@@ -342,6 +342,16 @@ export class PiRuntime {
       })
       await this.extensions.emit({ type: 'session_start', reason: 'startup' })
       const extensionsMs = performance.now() - extensionsStartedAt
+      // SPIKE (pi-sdk-spike): what pi's own extension runtime costs at boot.
+      const sdkStartedAt = performance.now()
+      const sdk = await import('@earendil-works/pi-coding-agent')
+      const sdkMs = performance.now() - sdkStartedAt
+      logger.info('[pi] pi-coding-agent loaded', {
+        ms: Math.round(sdkMs * 100) / 100,
+        exports: Object.keys(sdk).length,
+        hasLoader: typeof (sdk as { discoverAndLoadExtensions?: unknown }).discoverAndLoadExtensions === 'function',
+        hasSession: typeof (sdk as { createAgentSession?: unknown }).createAgentSession === 'function',
+      })
       this.tools = [...this.baseTools, ...this.extensions.agentTools()]
       this.skills = await this.loadSkills(core.loadSkills)
       this.policy = compilePermissionPolicy(this.compiledAgent()?.permission)
