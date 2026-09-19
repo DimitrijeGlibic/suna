@@ -268,10 +268,17 @@ export async function loadVisibleSession(
   /** True when `created_by` names a service account (or nobody). */
   ownerIsMachine: boolean;
 } | null> {
+  // TEMP research (KORTIX_QUERY_OPT): the caller's groups and the session's
+  // grants do not depend on the row; start all three reads together.
+  const opt = process.env.KORTIX_QUERY_OPT === '1';
+  const subjectEarly = opt ? resolveShareSubject(loaded.userId) : null;
+  const grantsEarly = opt ? loadSessionGrants([sessionId]) : null;
+  subjectEarly?.catch(() => undefined);
+  grantsEarly?.catch(() => undefined);
   const row = await loadProjectSessionRow(loaded, sessionId);
   if (!row) return null;
-  const subject = await resolveShareSubject(loaded.userId);
-  const grants = (await loadSessionGrants([sessionId])).get(sessionId) ?? [];
+  const subject = subjectEarly ? await subjectEarly : await resolveShareSubject(loaded.userId);
+  const grants = (grantsEarly ? await grantsEarly : await loadSessionGrants([sessionId])).get(sessionId) ?? [];
   const ownership = {
     origin: row.origin ?? null,
     sessionId,

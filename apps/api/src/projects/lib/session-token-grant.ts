@@ -433,7 +433,10 @@ export async function remintGrantForAgentSwitch(
     resolveCurrentGrant({
       ...input,
       runningAgent,
-      forceRefresh: true,
+      // TEMP research scenario (KORTIX_RESEARCH_REMINT_NO_FORCE=1): measures what
+      // the per-prompt forced `git fetch` costs. NOT a fix: it drops the
+      // "narrowed manifest applies next turn" guarantee this fetch provides.
+      forceRefresh: process.env.KORTIX_RESEARCH_REMINT_NO_FORCE !== '1',
     });
   const running = await resolve();
   const tResolved = performance.now();

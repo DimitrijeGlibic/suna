@@ -18,6 +18,7 @@ import {
 import { type SQL, and, desc, eq, gte, inArray, or, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { ProvisionTimeline } from '../../platform/services/provision-timeline';
+import { withQueryTrace } from '../../shared/query-trace';
 import { WIRE_ID_PLACED_HEADER } from '../../sandbox-proxy/prompt-wire-id-repair';
 import { bindChatThread } from '../../channels/slack/binding';
 import { config } from '../../config';
@@ -88,6 +89,7 @@ import {
   INBOX_ORDER_BACKOFF_MS,
   admitInboxPrompt,
   sessionHoldsLiveTurn,
+  sessionHoldsTurnAuthority,
 } from './inbox-admission';
 import { claimDueSessionInboxSiblings } from './inbox-rows';
 import { compareInboxSendOrder, inboxFollowsRow } from './inbox-order';
@@ -126,6 +128,8 @@ import type {
 } from './types';
 
 const WORKSPACE = '/workspace';
+/** TEMP research (prompt-delivery-latency): behavior-preserving query cuts, A/B switch. */
+const QUERY_OPT = process.env.KORTIX_QUERY_OPT === '1';
 const DAEMON_PORT = 8000;
 const READY_DEADLINE_MS = 300_000;
 const POLL_INTERVAL_MS = 3_000;
@@ -409,6 +413,11 @@ export async function continueSession(
 ): Promise<SessionDeliveryOutcome> {
   const { sessionId, text } = command;
   const idempotencyKey = commandId ?? randomUUID();
+  // TEMP research (KORTIX_QUERY_OPT): the fast-path target is one joined read,
+  // started now so it overlaps the session read below. A box that turns out
+  // stopped simply yields null and the slow path runs, as before.
+  const awakeEarly = QUERY_OPT ? awakeDeliveryTargetJoined(command.sessionId) : null;
+  awakeEarly?.catch(() => undefined);
   const [session] = await db
     .select({
       accountId: projectSessions.accountId,
@@ -575,12 +584,15 @@ export async function continueSession(
     firstPromptText: text,
   });
 
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.projectId, session.projectId))
-    .limit(1);
-  if (!project) return 'no-session';
+  // TEMP research (KORTIX_QUERY_OPT): the fast path never reads the project
+  // row (the session FK already proves it exists), so load it only for the
+  // slow path's openSession.
+  let projectRow: typeof projects.$inferSelect | undefined;
+  const loadProject = async () =>
+    (projectRow ??= (
+      await db.select().from(projects).where(eq(projects.projectId, session.projectId)).limit(1)
+    )[0]);
+  if (!QUERY_OPT && !(await loadProject())) return 'no-session';
 
   if (session.status === 'stopped' || session.status === 'completed') {
     await db
@@ -589,8 +601,10 @@ export async function continueSession(
       .where(eq(projectSessions.sessionId, sessionId));
   }
 
-  const loaded = { row: project, userId };
   const openOnce = async () => {
+    const project = await loadProject();
+    if (!project) return null;
+    const loaded = { row: project, userId };
     await beforeSend?.();
     const [fresh] = await db
       .select({
@@ -624,7 +638,7 @@ export async function continueSession(
   // proxy, whose own wake-and-retry loop and `deliverWithRetry.reopen` (the
   // full open) cover a box that turns out to be asleep after all. A cold or
   // stopping session takes the slow path below exactly as before.
-  const awake = await awakeDeliveryTarget(sessionId);
+  const awake = awakeEarly ? await awakeEarly : await awakeDeliveryTarget(sessionId);
   if (awake && !command.opencodeEnv) {
     tl?.mark('open-ready-fast');
     return deliverWithRetry({
@@ -763,7 +777,17 @@ const NOT_LANDED_RETRY_DELAY_MS = 2_000;
 /** How far out a released foreign command is re-queued; the owner's drain ticks every 1s. */
 const INSTANCE_RELEASE_DELAY_MS = 2_000;
 
-export async function drainSessionLifecycleQueue(
+// TEMP (prompt-delivery-latency research): trace the targeted drain (one POST's
+// kick) as its own flow. Periodic polls stay untraced.
+export function drainSessionLifecycleQueue(
+  input: Parameters<typeof drainSessionLifecycleQueueInner>[0] = {},
+): ReturnType<typeof drainSessionLifecycleQueueInner> {
+  return input.idempotencyKey
+    ? withQueryTrace('drain', input.idempotencyKey, () => drainSessionLifecycleQueueInner(input))
+    : drainSessionLifecycleQueueInner(input);
+}
+
+async function drainSessionLifecycleQueueInner(
   input: {
     workerId?: string;
     limit?: number;
@@ -1582,7 +1606,14 @@ function externalIdFromSandboxUrlField(url: string | null): string | null {
   return match?.[1] ?? null;
 }
 
-export async function executeQueuedContinue(
+// TEMP (prompt-delivery-latency research): one query trace per delivery.
+export function executeQueuedContinue(
+  row: SessionLifecycleCommandRow,
+): Promise<'succeeded' | 'queued' | 'failed'> {
+  return withQueryTrace('deliver', row.commandId, () => executeQueuedContinueInner(row));
+}
+
+async function executeQueuedContinueInner(
   row: SessionLifecycleCommandRow,
 ): Promise<'succeeded' | 'queued' | 'failed'> {
   const payload = row.payload as unknown as QueuedContinueSessionPayload;
@@ -1802,7 +1833,12 @@ export async function executeQueuedContinue(
   let turnLive = false;
   if (payload.wireMessageId && !remintKnown) {
     try {
-      turnLive = await sessionHoldsLiveTurn(row.sessionId);
+      // TEMP research (KORTIX_QUERY_OPT): admission read this row one wave ago
+      // and refuses delivery while a turn is live; reuse it instead of re-reading.
+      turnLive =
+        admission.admit && admission.sandbox !== undefined
+          ? sessionHoldsTurnAuthority(admission.sandbox)
+          : await sessionHoldsLiveTurn(row.sessionId);
     } catch (err) {
       console.warn('[session-lifecycle] turn-authority read failed — re-minting the wire id', {
         sessionId: row.sessionId,
@@ -2364,6 +2400,24 @@ async function awakeDeliveryTarget(sessionId: string): Promise<DeliveryTarget | 
     externalId: box.externalId,
     opencodeSessionId: session.opencodeSessionId,
   };
+}
+
+/** TEMP research (KORTIX_QUERY_OPT): `awakeDeliveryTarget` as one joined read. */
+async function awakeDeliveryTargetJoined(sessionId: string): Promise<DeliveryTarget | null> {
+  const [row] = await db
+    .select({
+      status: projectSessions.status,
+      opencodeSessionId: projectSessions.opencodeSessionId,
+      boxStatus: sessionSandboxes.status,
+      externalId: sessionSandboxes.externalId,
+    })
+    .from(projectSessions)
+    .leftJoin(sessionSandboxes, eq(sessionSandboxes.sessionId, projectSessions.sessionId))
+    .where(eq(projectSessions.sessionId, sessionId))
+    .limit(1);
+  if (!row || row.status !== 'running' || !row.opencodeSessionId) return null;
+  if (row.boxStatus !== 'active' || !row.externalId) return null;
+  return { stage: 'ready', externalId: row.externalId, opencodeSessionId: row.opencodeSessionId };
 }
 
 function sandboxExternalId(

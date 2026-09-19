@@ -116,6 +116,7 @@ import { scimRouter } from './scim';
 import { setupApp } from './setup';
 import { startAccessControlCache, stopAccessControlCache } from './shared/access-control-cache';
 import { auditApiRequest, shutdownAuditEvents } from './shared/audit';
+import { withQueryTrace } from './shared/query-trace';
 import {
   startAuditReconciliationWorker,
   stopAuditReconciliationWorker,
@@ -227,6 +228,14 @@ const UUID_PATH_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 // Exported so tooling/tests can introspect the route table (app.routes) without
 // booting the server. See the import.meta.main guard around startup below.
 export { app };
+
+// TEMP (prompt-delivery-latency research): trace POST .../prompts end to end,
+// auth and audit middleware included. Pass-through unless KORTIX_QUERY_TRACE=1.
+app.use('*', (c, next) =>
+  c.req.method === 'POST' && /\/sessions\/[^/]+\/prompts$/.test(c.req.path)
+    ? withQueryTrace('post-prompts', c.req.path.split('/')[5] ?? '', () => next())
+    : next(),
+);
 
 app.use('*', async (c, next) => {
   const path = c.req.path;

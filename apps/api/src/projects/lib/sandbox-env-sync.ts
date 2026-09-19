@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { projects, projectSessions, sessionSandboxes } from '@kortix/db';
 import { db } from '../../shared/db';
 import { resolveSandboxIngress } from '../../sandbox-proxy/backend';
@@ -107,6 +107,8 @@ export function __resetNetworkBoundaryArmCacheForTests(): void {
  * comparison on the daemon.
  */
 const lastPromptModelSignature = new Map<string, string>();
+/** TEMP research (prompt-delivery-latency): behavior-preserving query cuts, A/B switch. */
+const QUERY_OPT = process.env.KORTIX_QUERY_OPT === '1';
 /**
  * When each box last had its env pushed successfully. Together with the
  * signature above this is the "nothing to say" short-circuit: a prompt whose
@@ -370,6 +372,21 @@ async function resolveOwnerRawEnv(
   scope: SandboxEnvSnapshot['scope'];
 } | null> {
   if (!sessionId) return null;
+  // TEMP research (KORTIX_QUERY_OPT): the project read below does not depend on
+  // this row, so start both together.
+  const projectEarly = QUERY_OPT
+    ? db
+        .select({
+          repoUrl: projects.repoUrl,
+          defaultBranch: projects.defaultBranch,
+          manifestPath: projects.manifestPath,
+        })
+        .from(projects)
+        .where(eq(projects.projectId, projectId))
+        .limit(1)
+        .then((rows) => rows)
+    : null;
+  projectEarly?.catch(() => undefined);
   const [row] = await db
     .select({
       createdBy: projectSessions.createdBy,
@@ -393,15 +410,17 @@ async function resolveOwnerRawEnv(
   // the env with the RUNNING agent's grant before the prompt is forwarded. A
   // switch is never refused — see secret-grant.ts for why refusing protected
   // nothing that was still protectable.
-  const [project] = await db
-    .select({
-      repoUrl: projects.repoUrl,
-      defaultBranch: projects.defaultBranch,
-      manifestPath: projects.manifestPath,
-    })
-    .from(projects)
-    .where(eq(projects.projectId, projectId))
-    .limit(1);
+  const [project] = projectEarly
+    ? await projectEarly
+    : await db
+        .select({
+          repoUrl: projects.repoUrl,
+          defaultBranch: projects.defaultBranch,
+          manifestPath: projects.manifestPath,
+        })
+        .from(projects)
+        .where(eq(projects.projectId, projectId))
+        .limit(1);
 
   const grantEnv = await resolveSessionSecretGrant({
     projectId,
@@ -614,6 +633,15 @@ export async function syncSandboxEnvForPrompt(args: {
   const lap = (label: string) => {
     timing[label] = Math.round(performance.now() - t0 - Object.values(timing).reduce((a, b) => a + b, 0));
   };
+  // TEMP research (KORTIX_QUERY_OPT): the snapshot, the network boundary and
+  // the gateway flag are independent reads; start all three now and await them
+  // in the original order, so a failure surfaces exactly where it did before.
+  const boundaryEarly = QUERY_OPT
+    ? resolveSessionNetworkBoundary(args.projectId, args.sessionId, args.requestedAgent)
+    : null;
+  const gatewayEarly = QUERY_OPT ? projectLlmGatewayEnabledById(args.projectId) : null;
+  boundaryEarly?.catch(() => undefined);
+  gatewayEarly?.catch(() => undefined);
   const snapshot = await resolveSandboxEnvSnapshot(
     args.projectId,
     args.sessionId,
@@ -632,11 +660,9 @@ export async function syncSandboxEnvForPrompt(args: {
   // this leg omitted it and landed on the resolver's `?? true` default, so THIS
   // was the line that threw. The parameter is gone, so the two legs can no
   // longer disagree about policy — they share one resolver with one behavior.
-  const networkBoundary = await resolveSessionNetworkBoundary(
-    args.projectId,
-    args.sessionId,
-    args.requestedAgent,
-  );
+  const networkBoundary = boundaryEarly
+    ? await boundaryEarly
+    : await resolveSessionNetworkBoundary(args.projectId, args.sessionId, args.requestedAgent);
   lap('boundary');
   // Sampled BEFORE the attempt, because a failed arm forgets its record. `true`
   // means this process already armed a DIFFERENT set on this sandbox (an
@@ -700,7 +726,7 @@ export async function syncSandboxEnvForPrompt(args: {
     );
   }
   lap('arm');
-  const llmGatewayEnabled = await projectLlmGatewayEnabledById(args.projectId);
+  const llmGatewayEnabled = gatewayEarly ? await gatewayEarly : await projectLlmGatewayEnabledById(args.projectId);
   lap('gateway-flag');
   const llmGatewayBaseUrl = llmGatewayEnabled
     ? llmGatewayBaseUrlForProvider(args.providerName)
@@ -1015,6 +1041,24 @@ async function markSandboxLlmGatewayMode(
   sessionId: string,
   enabled: boolean,
 ): Promise<void> {
+  if (QUERY_OPT) {
+    // TEMP research (KORTIX_QUERY_OPT): one conditional statement instead of a
+    // read + an unconditional rewrite of the same value on every prompt. The
+    // turn-ledger writes still bump updated_at per prompt.
+    await db
+      .update(sessionSandboxes)
+      .set({
+        config: sql`COALESCE(${sessionSandboxes.config}, '{}'::jsonb) || jsonb_build_object('llmGatewayEnabled', ${enabled}::boolean)`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(sessionSandboxes.sessionId, sessionId),
+          sql`(${sessionSandboxes.config}->>'llmGatewayEnabled') IS DISTINCT FROM ${String(enabled)}`,
+        ),
+      );
+    return;
+  }
   const [row] = await db
     .select({ config: sessionSandboxes.config })
     .from(sessionSandboxes)

@@ -73,6 +73,13 @@ export async function canAccessSandboxSession(input: {
   const cached = sessionVisibilityCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.allowed;
 
+  // TEMP research (KORTIX_QUERY_OPT): groups and grants do not depend on the
+  // row; start them with it instead of one round trip later.
+  const opt = process.env.KORTIX_QUERY_OPT === '1';
+  const subjectEarly = opt ? resolveShareSubject(input.userId) : null;
+  const grantsEarly = opt ? loadSessionGrants([input.sessionId]) : null;
+  subjectEarly?.catch(() => undefined);
+  grantsEarly?.catch(() => undefined);
   const [row] = await db
     .select({
       visibility: projectSessions.visibility,
@@ -93,8 +100,8 @@ export async function canAccessSandboxSession(input: {
   let allowed = true;
   if (row) {
     const [subject, grantsBySession, managerVerdict] = await Promise.all([
-      resolveShareSubject(input.userId),
-      loadSessionGrants([input.sessionId]),
+      subjectEarly ?? resolveShareSubject(input.userId),
+      grantsEarly ?? loadSessionGrants([input.sessionId]),
       isTriggerCreatedSessionMetadata(row.metadata)
         ? authorize(
             actorForUser(input.userId, input.accountId),

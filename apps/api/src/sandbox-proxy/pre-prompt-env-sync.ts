@@ -314,6 +314,15 @@ export async function runPrePromptEnvSync(
     userId,
   });
   try {
+    // TEMP research (KORTIX_QUERY_OPT): the token re-mint does not read what the
+    // env sync writes, so start it now; both still finish before the forward.
+    // Failure-path difference to review: a refused env sync may leave the token
+    // re-pointed at the requested agent (the prompt itself is still refused).
+    const remintEarly =
+      process.env.KORTIX_QUERY_OPT === '1'
+        ? deps.remintGrant({ projectId: record.projectId, sessionId: record.sessionId, sessionAgent, requestedAgent })
+        : null;
+    remintEarly?.catch(() => undefined);
     await deps.syncEnv({
       projectId: record.projectId,
       sessionId: record.sessionId,
@@ -326,6 +335,10 @@ export async function runPrePromptEnvSync(
       // not the session's create-time column — see projects/lib/secret-grant.ts.
       requestedAgent,
     });
+    if (remintEarly) {
+      await remintEarly;
+      return null;
+    }
     // The env sync above applied the running agent's secret grant, or refused it
     // when the optional strict lock is enabled. Re-point the token's
     // connector/CLI grant at the agent that will actually run — it was frozen at

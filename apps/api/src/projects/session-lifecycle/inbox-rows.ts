@@ -437,7 +437,25 @@ export async function holdInboxPrompts(sessionId: string, held: boolean): Promis
 }
 
 /** Release without asserting anything about whether a hold was set. */
-export function releaseInboxHold(sessionId: string): Promise<number> {
+export async function releaseInboxHold(sessionId: string): Promise<number> {
+  // TEMP research (KORTIX_QUERY_OPT): every POST calls this, and without a Stop
+  // all three ordered UPDATEs below match nothing. One read of the superset of
+  // their predicates decides whether any of them can touch a row.
+  if (process.env.KORTIX_QUERY_OPT === '1') {
+    const [marked] = await db
+      .select({ commandId: sessionLifecycleCommands.commandId })
+      .from(sessionLifecycleCommands)
+      .where(
+        and(
+          inboxScope(sessionId),
+          sql`(COALESCE(${sessionLifecycleCommands.payload}->>'stopPausedOnDelivery', '') = 'true'
+            OR COALESCE(${sessionLifecycleCommands.result}->>'held', '') = 'true'
+            OR COALESCE(${sessionLifecycleCommands.result}->>'stop_paused', '') = 'true')`,
+        ),
+      )
+      .limit(1);
+    if (!marked) return 0;
+  }
   return holdInboxPrompts(sessionId, false);
 }
 

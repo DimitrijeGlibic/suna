@@ -11,6 +11,7 @@
  *
  * Overhead is negligible (a push + a subtraction per mark) so it's always on.
  */
+import { traceMark } from '../../shared/query-trace';
 
 export interface TimelineMark {
   label: string;
@@ -42,6 +43,7 @@ export class ProvisionTimeline {
 
   /** Record the completion of a step. */
   mark(label: string): void {
+    traceMark(`${this.kind}:${label}`); // TEMP (prompt-delivery-latency research)
     const now = performance.now();
     this.marks.push({
       label,

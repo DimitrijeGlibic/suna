@@ -1,6 +1,7 @@
 import { createDb, type Database } from '@kortix/db';
 import { config } from '../config';
 import { contextualDatabase } from './db-context';
+import { traceDb } from './query-trace';
 
 const globalForDb = globalThis as typeof globalThis & {
   __kortixApiDb?: Database;
@@ -44,4 +45,5 @@ function getDb(): Database {
   return globalForDb.__kortixApiDb;
 }
 
-export const { db, transaction: withDbTransaction, afterCommit: afterDbCommit } = contextualDatabase(getDb());
+// TEMP (prompt-delivery-latency research): traceDb is a pass-through unless KORTIX_QUERY_TRACE=1.
+export const { db, transaction: withDbTransaction, afterCommit: afterDbCommit } = contextualDatabase(traceDb(getDb()));

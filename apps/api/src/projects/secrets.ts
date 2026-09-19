@@ -871,13 +871,24 @@ export async function listProjectSecretsSnapshotForUser(
   capabilities: SecretCapabilityCatalog;
   capabilitiesJson: string;
 }> {
+  // TEMP research (KORTIX_QUERY_OPT): these three reads are independent; start
+  // them together. Off, the order and count are unchanged.
+  const opt = process.env.KORTIX_QUERY_OPT === '1';
+  const connectorRowsEarly = opt
+    ? db.select({ identifier: connectors.authSecret }).from(connectors).where(eq(connectors.projectId, projectId)).then((r) => r)
+    : null;
+  const gatewayEarly = opt ? projectLlmGatewayEnabledById(projectId) : null;
+  connectorRowsEarly?.catch(() => undefined);
+  gatewayEarly?.catch(() => undefined);
   const rows = await listResolvedProjectSecrets(projectId, userId);
   const boundConnectorIdentifiers = new Set(
     (
-      await db
-        .select({ identifier: connectors.authSecret })
-        .from(connectors)
-        .where(eq(connectors.projectId, projectId))
+      connectorRowsEarly
+        ? await connectorRowsEarly
+        : await db
+            .select({ identifier: connectors.authSecret })
+            .from(connectors)
+            .where(eq(connectors.projectId, projectId))
     )
       .map((row) => row.identifier)
       .filter((identifier): identifier is string => Boolean(identifier)),
@@ -887,7 +898,7 @@ export async function listProjectSecretsSnapshotForUser(
   // Resolved HERE, once, so boot, hot push, and the toggle fan-out all deliver
   // model credentials from the same decision — a caller cannot pass a stale
   // mode and desynchronise the box from the project's flag.
-  const llmGatewayEnabled = await projectLlmGatewayEnabledById(projectId);
+  const llmGatewayEnabled = gatewayEarly ? await gatewayEarly : await projectLlmGatewayEnabledById(projectId);
   const delivered = await materializeSecretDelivery(selected, env, {
     sessionId: sessionId ?? null,
     grantEnv,

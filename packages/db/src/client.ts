@@ -89,6 +89,10 @@ export function createDb(databaseUrl: string, options?: postgres.Options<{}>) {
     connection: {
       statement_timeout: STATEMENT_TIMEOUT_MS,
     },
+    // TEMP (prompt-delivery-latency research): report every statement to the
+    // API's query tracer when one is installed (KORTIX_QUERY_TRACE=1).
+    debug: (_connection: number, query: string) =>
+      (globalThis as { __kortixQueryLogger?: (sql: string) => void }).__kortixQueryLogger?.(query),
     ...options,
   });
 

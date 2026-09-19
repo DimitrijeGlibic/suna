@@ -73,7 +73,11 @@ function admissionRefusals(result: unknown): number {
  *  written into `result.admission_reason` and served as `GET .../prompts`'
  *  `reason`, where a second value may well appear again. */
 export type InboxAdmission =
-  | { admit: true }
+  | {
+      admit: true;
+      /** TEMP research (KORTIX_QUERY_OPT): the sandbox row admission read, reused by the drain. */
+      sandbox?: { status: string; metadata: Record<string, unknown> | null } | null;
+    }
   | {
       admit: false;
       reason: InboxAdmissionReason;
@@ -194,6 +198,9 @@ export async function admitInboxPrompt(
   // A row with no session cannot be ordered or gated. Admit it so the drain
   // reaches its own honest failure instead of requeueing it for ever.
   if (!row.sessionId) return { admit: true };
+  // TEMP research (KORTIX_QUERY_OPT): the three reads below are independent;
+  // start them together instead of one round trip after another.
+  if (QUERY_OPT && deps === liveDeps) deps = prefetchAdmissionReads(row, deps);
 
   const refusals = admissionRefusals(row.result);
   const orderBackoffMs = admissionBackoffMs(
@@ -258,5 +265,36 @@ export async function admitInboxPrompt(
     return { admit: false, reason: 'older_prompt_pending', retryAfterMs: orderBackoffMs };
   }
 
-  return { admit: true };
+  return QUERY_OPT ? { admit: true, sandbox } : { admit: true };
+}
+
+// ── TEMP research (prompt-delivery-latency, KORTIX_QUERY_OPT=1) ─────────────
+const QUERY_OPT = process.env.KORTIX_QUERY_OPT === '1';
+
+/** Start readSandbox / hasInFlightPrompt / hasOlderPendingPrompt together; the
+ *  gate logic above still consumes them in its own order. A second readSandbox
+ *  (after a turn reconcile) goes back to the database. */
+function prefetchAdmissionReads(row: SessionLifecycleCommandRow, base: InboxAdmissionDeps): InboxAdmissionDeps {
+  const sessionId = row.sessionId as string;
+  const quiet = <T,>(p: Promise<T>): Promise<T> => {
+    p.catch(() => undefined);
+    return p;
+  };
+  const sandbox = quiet(base.readSandbox(sessionId));
+  const inFlight = quiet(base.hasInFlightPrompt(sessionId, row.commandId));
+  const older = quiet(base.hasOlderPendingPrompt(sessionId, row));
+  let sandboxServed = false;
+  return {
+    ...base,
+    readSandbox: (sid) => {
+      if (!sandboxServed && sid === sessionId) {
+        sandboxServed = true;
+        return sandbox;
+      }
+      return base.readSandbox(sid);
+    },
+    hasInFlightPrompt: (sid, except) =>
+      sid === sessionId && except === row.commandId ? inFlight : base.hasInFlightPrompt(sid, except),
+    hasOlderPendingPrompt: (sid, r) => (sid === sessionId && r === row ? older : base.hasOlderPendingPrompt(sid, r)),
+  };
 }
