@@ -415,7 +415,10 @@ export async function remintGrantForAgentSwitch(
     runningAgent = input.sessionAgent;
   }
 
+  // TEMP (prompt-delivery-latency research): per-step timing.
+  const t0 = performance.now();
   const stored = await loadStoredSessionGrant(input.sessionId);
+  const tStored = performance.now();
   // Synchronous for the same-agent case too — every ordinary turn. This ran in
   // the background for one release (the manifest read is a git fetch of the
   // project mirror, ~0.8s on the path of every prompt) and the security review
@@ -433,7 +436,16 @@ export async function remintGrantForAgentSwitch(
       forceRefresh: true,
     });
   const running = await resolve();
-  return applyResolvedGrant(input, stored, running, resolve);
+  const tResolved = performance.now();
+  const decision = await applyResolvedGrant(input, stored, running, resolve);
+  const tApplied = performance.now();
+  console.log(`[grant-remint] timing session=${input.sessionId.slice(0, 8)} ${JSON.stringify({
+    stored: Math.round(tStored - t0),
+    resolve: Math.round(tResolved - tStored),
+    apply: Math.round(tApplied - tResolved),
+    action: decision.action,
+  })}`);
+  return decision;
 }
 
 /**

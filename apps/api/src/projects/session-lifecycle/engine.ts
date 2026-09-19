@@ -496,7 +496,9 @@ export async function continueSession(
   };
   const sendPrompt = async (externalId: string, opencodeSessionId: string): Promise<SendOutcome> => {
     await repairLegacyBeforeDelivery(externalId, opencodeSessionId);
+    tl?.mark('repair-legacy');
     await beforeSend?.();
+    tl?.mark('before-send');
     const delivery = await postPrompt(
       externalId,
       opencodeSessionId,
@@ -515,6 +517,7 @@ export async function continueSession(
         projectId: session.projectId,
       },
     );
+    tl?.mark('post-prompt');
     // ACCEPTANCE IS NOT DELIVERY. `prompt_async` answers for the request, and
     // the sandbox edge discards a body over its size ceiling then answers 200
     // on retry — so a prompt can be "accepted" and never exist. Read it back
@@ -539,6 +542,7 @@ export async function continueSession(
             messageId,
           }),
       });
+      tl?.mark('landed-proof');
       if (!landed) {
         logger.error('[session-lifecycle] prompt accepted but never became a message', {
           session_id: sessionId,

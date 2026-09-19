@@ -77,7 +77,8 @@ export function createDb(databaseUrl: string, options?: postgres.Options<{}>) {
     // can't be reused). Prod currently uses the DIRECT connection where prepared
     // statements would be fine, but leaving this off keeps a pooler switch a
     // pure connection-string change with no code impact.
-    prepare: false,
+    // TEMP (prompt-delivery-latency research, run C): measure prepare=true.
+    prepare: process.env.KORTIX_DB_PREPARE === '1',
     max: POOL_MAX,
     idle_timeout: IDLE_TIMEOUT_S,
     connect_timeout: CONNECT_TIMEOUT_S,
